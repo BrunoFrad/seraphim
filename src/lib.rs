@@ -22,13 +22,13 @@ pub mod cli {
 }
 
 pub mod server {
-    use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
+    use std::net::Ipv4Addr;
+
+use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
     use actix_ws::AggregatedMessage;
-    use email_address::EmailAddress;
     use futures_util::StreamExt as _;
     use serde::Deserialize;
-    use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
-    use std::{net::Ipv4Addr, str::FromStr};
+    use super::db::*;
 
     pub async fn run(port: u16) -> Result<(), std::io::Error> {
         HttpServer::new(|| App::new().route("/", web::get().to(handle_wsmessage)))
@@ -97,7 +97,22 @@ pub mod server {
         Ok(payload)
     }
 
-    async fn connect_db() -> Result<Pool<Sqlite>, sqlx::Error> {
+    #[derive(Deserialize)]
+    pub struct LogPayload {
+        pub ip: Ipv4Addr,
+        pub app: String,
+        pub content: String,
+    }
+
+}
+
+pub mod db {
+    use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
+    use std::{str::FromStr};
+    use email_address::EmailAddress;
+    use super::server::LogPayload;
+
+    pub async fn connect_db() -> Result<Pool<Sqlite>, sqlx::Error> {
         let options =
             SqliteConnectOptions::from_str("sqlite://seraphim.db")?.create_if_missing(true);
 
@@ -142,7 +157,7 @@ pub mod server {
         }
     }
 
-    async fn store_db(payload: LogPayload, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    pub async fn store_db(payload: LogPayload, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
                 CREATE TABLE IF NOT EXISTS logs (
@@ -177,13 +192,6 @@ pub mod server {
         .await?;
 
         Ok(())
-    }
-
-    #[derive(Deserialize)]
-    struct LogPayload {
-        ip: Ipv4Addr,
-        app: String,
-        content: String,
     }
 
     enum ContentTypes {
