@@ -1,3 +1,9 @@
+use clap::{Parser};
+
 fn main() {
-    println!("Hello, world!");
+    Cli::parse();
 }
+
+#[derive(Parser)]
+#[command(version, about="An easy-to-use, fast and full-featured CLI for managing logs")]
+struct Cli {}
