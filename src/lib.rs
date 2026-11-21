@@ -15,8 +15,8 @@ pub mod cli {
     pub enum Commands {
         /// Runs seraphim server without an interface (keep running until exit the process)
         Watch {
-            #[arg(short, long)]
-            port: Option<u16>,
+            #[arg(short, long, default_value_t = 7777)]
+            port: u16,
         },
     }
 }
