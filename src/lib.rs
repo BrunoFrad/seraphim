@@ -1,12 +1,24 @@
 pub mod cli {
-    use clap::Parser;
+    use clap::{Parser, Subcommand};
 
     #[derive(Parser)]
     #[command(
         version,
         about = "An easy-to-use, fast and full-featured CLI for managing logs"
     )]
-    pub struct Cli {}
+    pub struct Cli {
+        #[command(subcommand)]
+        pub command: Commands,
+    }
+
+    #[derive(Subcommand)]
+    pub enum Commands {
+        /// Runs seraphim server without an interface (keep running until exit the process)
+        Watch {
+            #[arg(short, long)]
+            port: Option<u16>,
+        },
+    }
 }
 
 pub mod server {
@@ -25,13 +37,15 @@ pub mod server {
         req: HttpRequest,
         stream: web::Payload,
     ) -> Result<HttpResponse, Error> {
-        let (res, _, stream) = actix_ws::handle(&req, stream)?;
+        let (res, session, stream) = actix_ws::handle(&req, stream)?;
 
         let mut stream = stream
             .aggregate_continuations()
             .max_continuation_size(2_usize.pow(20));
 
         rt::spawn(async move {
+            let _session = session;
+
             while let Some(msg) = stream.next().await {
                 match msg {
                     Ok(AggregatedMessage::Text(text)) => {
