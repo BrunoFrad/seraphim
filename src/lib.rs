@@ -106,8 +106,7 @@ pub mod server {
     }
 
     fn parse_message(text: String) -> Result<LogPayload, serde_json::Error> {
-        let payload: LogPayload = serde_json::from_str(&text)?;
-        Ok(payload)
+        serde_json::from_str(&text)
     }
 
     #[derive(Deserialize)]
@@ -150,7 +149,7 @@ pub mod db {
             .execute(&pool)
             .await?;
 
-            Ok(Database { pool: pool })
+            Ok(Database { pool })
         }
     }
 

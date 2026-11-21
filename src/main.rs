@@ -9,9 +9,7 @@ async fn main() -> std::io::Result<()> {
         Commands::Watch { port } => {
             println!("=> Server is running on ws://127.0.0.1:{port}");
 
-            let server = Server::new()
-                .await
-                .map_err(std::io::Error::other)?;
+            let server = Server::new().await.map_err(std::io::Error::other)?;
 
             server.run(port).await?;
         }
