@@ -29,7 +29,7 @@ pub mod server {
     use actix_ws::AggregatedMessage;
     use futures_util::StreamExt as _;
     use serde::Deserialize;
-    use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
+    use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
 
     pub async fn run(port: u16) -> Result<(), std::io::Error> {
         HttpServer::new(|| App::new().route("/", web::get().to(handle_wsmessage)))
@@ -49,34 +49,50 @@ pub mod server {
             .max_continuation_size(2_usize.pow(20));
 
         rt::spawn(async move {
-            let _session = session;
+    let _session = session;
 
-            while let Some(msg) = stream.next().await {
-                match msg {
-                    Ok(AggregatedMessage::Text(msg)) => match parse_message(msg.to_string()) {
-                        Ok(msg) => match store_in_db(msg).await {
+    let pool = match connect_db().await {
+        Ok(pool) => pool,
+        Err(err) => {
+            eprintln!("Error: Failed to connect to the database.");
+            eprintln!("Error output was: {err}");
+            return;
+        }
+    };
+
+    while let Some(msg) = stream.next().await {
+        match msg {
+            Ok(AggregatedMessage::Text(msg)) => {
+                match parse_message(msg.to_string()) {
+                    Ok(payload) => {
+                        match store_db(payload, &pool).await {
+                            Ok(()) => {}
                             Err(err) => {
                                 eprintln!(
                                     "Error: Failed to save the WebSocket input content in Database."
                                 );
                                 eprintln!("Error output was: {err}");
                             }
-                            _ => (),
-                        },
-                        Err(err) => {
-                            eprintln!("Error: Failed to parse the WebSocket input.");
-                            eprintln!("Error output was: {err}");
-                            eprintln!("Tip: the message must be a JSON in this format:");
-                            eprintln!(
-                                r#"{{ "ip": "123.123.123.123", "app": "text", "content": "text" }}"#
-                            );
                         }
-                    },
-
-                    _ => {}
+                    }
+                    Err(err) => {
+                        eprintln!("Error: Failed to parse the WebSocket input.");
+                        eprintln!("Error output was: {err}");
+                        eprintln!("Tip: the message must be a JSON in this format:");
+                        eprintln!(
+                            r#"{{ "ip": "123.123.123.123", "app": "text", "content": "text" }}"#
+                        );
+                    }
                 }
             }
-        });
+            Ok(_) => (),
+            Err(err) => {
+                eprintln!("Error: WebSocket stream error: {err}");
+                break;
+            }
+        }
+    }
+});
 
         Ok(res)
     }
@@ -86,12 +102,16 @@ pub mod server {
         Ok(payload)
     }
 
-    async fn store_in_db(payload: LogPayload) -> Result<(), sqlx::Error> {
+    async fn connect_db() -> Result<Pool<Sqlite>, sqlx::Error> {
         let options =
             SqliteConnectOptions::from_str("sqlite://seraphim.db")?.create_if_missing(true);
 
         let pool = SqlitePool::connect_with(options).await?;
 
+        Ok(pool)
+    }
+
+    async fn store_db(payload: LogPayload, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
                 CREATE TABLE IF NOT EXISTS logs (
@@ -103,7 +123,7 @@ pub mod server {
                 );
         "#,
         )
-        .execute(&pool)
+        .execute(pool)
         .await?;
 
         sqlx::query(
@@ -115,7 +135,7 @@ pub mod server {
         .bind(&payload.ip.to_string())
         .bind(&payload.app)
         .bind(&payload.content)
-        .execute(&pool)
+        .execute(pool)
         .await?;
 
         Ok(())
