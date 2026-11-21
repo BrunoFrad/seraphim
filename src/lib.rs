@@ -22,9 +22,13 @@ pub mod cli {
 }
 
 pub mod server {
-    use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
+
+    use std::net::Ipv4Addr;
+
+use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
     use actix_ws::AggregatedMessage;
     use futures_util::StreamExt as _;
+    use serde::Deserialize;
 
     pub async fn run(port: u16) -> Result<(), std::io::Error> {
         HttpServer::new(|| App::new().route("/", web::get().to(handle_wsmessage)))
@@ -48,8 +52,20 @@ pub mod server {
 
             while let Some(msg) = stream.next().await {
                 match msg {
-                    Ok(AggregatedMessage::Text(text)) => {
-                        println!("Got {text}");
+                    Ok(AggregatedMessage::Text(msg)) => {
+                        match parse_message(msg.to_string()) {
+                            Ok(msg) => {
+                                println!("{} {} {}", msg.ip, msg.app, msg.content);
+                            },
+                            Err(err) => {
+                                eprintln!("Error: Failed to parse the WebSocket input.");
+                                eprintln!("Error output was: {err}");
+                                eprintln!("Tip: the message must be a JSON in this format:");
+                                eprintln!(
+                                    r#"{{ "ip": "123.123.123.123", "app": "text", "content": "text" }}"#
+                                );
+                            }
+                        }
                     }
 
                     _ => {}
@@ -58,5 +74,17 @@ pub mod server {
         });
 
         Ok(res)
+    }
+
+    fn parse_message(text: String) -> Result<LogPayload, serde_json::Error> {
+        let payload: LogPayload = serde_json::from_str(&text)?;
+        Ok(payload)
+    }
+
+    #[derive(Deserialize)]
+    struct LogPayload {
+        ip: Ipv4Addr,
+        app: String,
+        content: String,
     }
 }
