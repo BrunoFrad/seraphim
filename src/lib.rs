@@ -23,12 +23,13 @@ pub mod cli {
 
 pub mod server {
 
-    use std::net::Ipv4Addr;
+    use std::{net::Ipv4Addr, str::FromStr};
 
-use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
+    use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
     use actix_ws::AggregatedMessage;
     use futures_util::StreamExt as _;
     use serde::Deserialize;
+    use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
 
     pub async fn run(port: u16) -> Result<(), std::io::Error> {
         HttpServer::new(|| App::new().route("/", web::get().to(handle_wsmessage)))
@@ -52,21 +53,25 @@ use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
 
             while let Some(msg) = stream.next().await {
                 match msg {
-                    Ok(AggregatedMessage::Text(msg)) => {
-                        match parse_message(msg.to_string()) {
-                            Ok(msg) => {
-                                println!("{} {} {}", msg.ip, msg.app, msg.content);
-                            },
+                    Ok(AggregatedMessage::Text(msg)) => match parse_message(msg.to_string()) {
+                        Ok(msg) => match store_in_db(msg).await {
                             Err(err) => {
-                                eprintln!("Error: Failed to parse the WebSocket input.");
-                                eprintln!("Error output was: {err}");
-                                eprintln!("Tip: the message must be a JSON in this format:");
                                 eprintln!(
-                                    r#"{{ "ip": "123.123.123.123", "app": "text", "content": "text" }}"#
+                                    "Error: Failed to save the WebSocket input content in Database."
                                 );
+                                eprintln!("Error output was: {err}");
                             }
+                            _ => (),
+                        },
+                        Err(err) => {
+                            eprintln!("Error: Failed to parse the WebSocket input.");
+                            eprintln!("Error output was: {err}");
+                            eprintln!("Tip: the message must be a JSON in this format:");
+                            eprintln!(
+                                r#"{{ "ip": "123.123.123.123", "app": "text", "content": "text" }}"#
+                            );
                         }
-                    }
+                    },
 
                     _ => {}
                 }
@@ -79,6 +84,41 @@ use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
     fn parse_message(text: String) -> Result<LogPayload, serde_json::Error> {
         let payload: LogPayload = serde_json::from_str(&text)?;
         Ok(payload)
+    }
+
+    async fn store_in_db(payload: LogPayload) -> Result<(), sqlx::Error> {
+        let options =
+            SqliteConnectOptions::from_str("sqlite://seraphim.db")?.create_if_missing(true);
+
+        let pool = SqlitePool::connect_with(options).await?;
+
+        sqlx::query(
+            r#"
+                CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                ip TEXT,
+                app TEXT,
+                content TEXT
+                );
+        "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO logs (ip, app, content)
+            VALUES (?, ?, ?)
+        "#,
+        )
+        .bind(&payload.ip.to_string())
+        .bind(&payload.app)
+        .bind(&payload.content)
+        .execute(&pool)
+        .await?;
+
+        Ok(())
     }
 
     #[derive(Deserialize)]
