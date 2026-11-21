@@ -24,7 +24,7 @@ pub mod cli {
 pub mod server {
     use std::net::Ipv4Addr;
 
-    use super::db::*;
+    use super::db::{connect_db, store_db};
     use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
     use actix_ws::AggregatedMessage;
     use futures_util::StreamExt as _;
