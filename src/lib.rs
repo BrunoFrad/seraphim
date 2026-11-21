@@ -24,25 +24,44 @@ pub mod cli {
 pub mod server {
     use std::net::Ipv4Addr;
 
-    use super::db::{connect_db, store_db};
+    use super::db::{Database, store_db};
     use actix_web::{App, Error, HttpRequest, HttpResponse, HttpServer, rt, web};
     use actix_ws::AggregatedMessage;
     use futures_util::StreamExt as _;
     use serde::Deserialize;
 
-    pub async fn run(port: u16) -> Result<(), std::io::Error> {
-        HttpServer::new(|| App::new().route("/", web::get().to(handle_wsmessage)))
+    pub struct Server {
+        pub database: Database,
+    }
+
+    impl Server {
+        pub async fn new() -> Result<Self, sqlx::Error> {
+            Ok(Self {
+                database: Database::new().await?,
+            })
+        }
+
+        pub async fn run(self, port: u16) -> Result<(), std::io::Error> {
+            let database = web::Data::new(self.database);
+
+            HttpServer::new(move || {
+                App::new()
+                    .app_data(database.clone())
+                    .route("/", web::get().to(handle_wsmessage))
+            })
             .bind(("127.0.0.1", port))?
             .run()
             .await
+        }
     }
 
     async fn handle_wsmessage(
         req: HttpRequest,
         stream: web::Payload,
+        database: web::Data<Database>,
     ) -> Result<HttpResponse, Error> {
         let (res, session, stream) = actix_ws::handle(&req, stream)?;
-
+        let database = database.clone();
         let mut stream = stream
             .aggregate_continuations()
             .max_continuation_size(2_usize.pow(20));
@@ -50,19 +69,10 @@ pub mod server {
         rt::spawn(async move {
             let _session = session;
 
-            let pool = match connect_db().await {
-                Ok(pool) => pool,
-                Err(err) => {
-                    eprintln!("Error: Failed to connect to the database.");
-                    eprintln!("Error output was: {err}");
-                    return;
-                }
-            };
-
             while let Some(msg) = stream.next().await {
                 match msg {
                     Ok(AggregatedMessage::Text(msg)) => match parse_message(msg.to_string()) {
-                        Ok(payload) => match store_db(payload, &pool).await {
+                        Ok(payload) => match store_db(payload, &database.pool).await {
                             Ok(()) => {}
                             Err(err) => {
                                 eprintln!(
@@ -114,13 +124,34 @@ pub mod db {
     use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
     use std::{fmt, str::FromStr};
 
-    pub async fn connect_db() -> Result<Pool<Sqlite>, sqlx::Error> {
-        let options =
-            SqliteConnectOptions::from_str("sqlite://seraphim.db")?.create_if_missing(true);
+    pub struct Database {
+        pub pool: Pool<Sqlite>,
+    }
 
-        let pool = SqlitePool::connect_with(options).await?;
+    impl Database {
+        pub async fn new() -> Result<Database, sqlx::Error> {
+            let options =
+                SqliteConnectOptions::from_str("sqlite://seraphim.db")?.create_if_missing(true);
 
-        Ok(pool)
+            let pool = SqlitePool::connect_with(options).await?;
+
+            sqlx::query(
+                r#"
+                    CREATE TABLE IF NOT EXISTS logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ip TEXT,
+                    app TEXT,
+                    content TEXT,
+                    type TEXT
+                    );
+            "#,
+            )
+            .execute(&pool)
+            .await?;
+
+            Ok(Database { pool: pool })
+        }
     }
 
     async fn check_last_log_type(
@@ -164,21 +195,6 @@ pub mod db {
     }
 
     pub async fn store_db(payload: LogPayload, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"
-                CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                ip TEXT,
-                app TEXT,
-                content TEXT,
-                type TEXT
-                );
-        "#,
-        )
-        .execute(pool)
-        .await?;
-
         let content_type = check_content(&payload, pool).await?;
 
         sqlx::query(
