@@ -109,11 +109,85 @@ pub mod server {
         serde_json::from_str(&text)
     }
 
-    #[derive(Deserialize)]
+    #[derive(Debug, Deserialize, PartialEq)]
     pub struct LogPayload {
         pub ip: Ipv4Addr,
         pub app: String,
         pub content: String,
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::net::Ipv4Addr;
+
+        use super::{LogPayload, parse_message};
+
+        #[test]
+        fn it_parses_correct_json() {
+            let expected = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo"),
+            };
+
+            let result = parse_message(String::from(
+                r#"{ "ip": "127.0.0.1", "app": "test_app", "content": "foo" }"#,
+            ));
+
+            assert_eq!(result.unwrap(), expected);
+        }
+
+        #[test]
+        fn it_rejects_invalid_ip() {
+            let result = parse_message(String::from(
+                r#"{ "ip": "abc", "app": "test_app", "content": "foo" }"#,
+            ));
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn it_rejects_non_string_app() {
+            let result = parse_message(String::from(
+                r#"{ "ip": "127.0.0.1", "app": 123, "content": "foo" }"#,
+            ));
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn it_rejects_non_string_content() {
+            let result = parse_message(String::from(
+                r#"{ "ip": "127.0.0.1", "app": "test_app", "content": true }"#,
+            ));
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn it_rejects_missing_content_field() {
+            let result = parse_message(String::from(r#"{ "ip": "127.0.0.1", "app": "test_app" }"#));
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn it_rejects_malformed_json() {
+            let result = parse_message(String::from(
+                r#"{ "ip": "127.0.0.1", "app": "test_app", "content": "foo" "#,
+            ));
+
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn it_accepts_empty_strings() {
+            let result = parse_message(String::from(
+                r#"{ "ip": "127.0.0.1", "app": "", "content": "" }"#,
+            ));
+
+            assert!(result.is_ok());
+        }
     }
 }
 
