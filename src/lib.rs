@@ -307,17 +307,30 @@ pub mod db {
 
     #[cfg(test)]
     mod test {
-        use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
+        use sqlx::{Pool, Sqlite, SqlitePool, sqlite::SqliteConnectOptions};
+        use temp_testdir::TempDir;
 
-        use super::Database;
+        struct DatabaseTest {
+            pool: Pool<Sqlite>,
+            _temp: TempDir,
+        }
+
         use crate::{
             db::{ContentTypes, check_content, check_last_log_type, store_db},
             server::LogPayload,
         };
-        use std::{net::Ipv4Addr, str::FromStr};
+        use std::{net::Ipv4Addr, path::PathBuf, str::FromStr};
 
-        async fn setup_database(name: &str) -> Result<Database, sqlx::Error> {
-            let options = SqliteConnectOptions::from_str(&format!("sqlite://{name}.db"))?
+        async fn setup_database(name: &str) -> Result<DatabaseTest, sqlx::Error> {
+            let temp = TempDir::default();
+            let mut db_path = PathBuf::from(temp.as_ref());
+            db_path.push(name);
+
+            let db_path = db_path
+                .into_string()
+                .expect("Failed to parse DB path to a string");
+
+            let options = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}.db",))?
                 .create_if_missing(true);
 
             let pool = SqlitePool::connect_with(options).await?;
@@ -337,15 +350,7 @@ pub mod db {
             .execute(&pool)
             .await?;
 
-            Ok(Database { pool })
-        }
-
-        #[tokio::test]
-        async fn it_creates_a_new_database() {
-            assert!(Database::new().await.is_ok());
-
-            // clean up
-            std::fs::remove_file("./seraphim.db").expect("Failed to clean database.");
+            Ok(DatabaseTest { pool, _temp: temp })
         }
 
         #[tokio::test]
@@ -376,9 +381,6 @@ pub mod db {
             assert_eq!(result.0, "127.0.0.1");
             assert_eq!(result.1, "test_app");
             assert_eq!(result.2, "foo");
-
-            // clean up
-            std::fs::remove_file("./test_store.db").expect("Failed to clean database.");
         }
 
         #[tokio::test]
@@ -404,9 +406,6 @@ pub mod db {
             if let Some(result_content) = result.unwrap() {
                 assert_eq!(result_content, "PlainText");
             }
-
-            // clean up
-            std::fs::remove_file("./test_last_log_plain.db").expect("Failed to clean database.");
         }
 
         #[tokio::test]
@@ -432,9 +431,6 @@ pub mod db {
             if let Some(result_content) = result.unwrap() {
                 assert_eq!(result_content, "Email");
             }
-
-            // clean up
-            std::fs::remove_file("./test_last_log_email.db").expect("Failed to clean database.");
         }
 
         #[tokio::test]
@@ -472,9 +468,6 @@ pub mod db {
             if let Some(result_content) = result.unwrap() {
                 assert_eq!(result_content, "Password");
             }
-
-            // clean up
-            std::fs::remove_file("./test_last_log_password.db").expect("Failed to clean database.");
         }
 
         #[tokio::test]
@@ -521,9 +514,6 @@ pub mod db {
             if let Some(result_content) = result.unwrap() {
                 assert_eq!(result_content, "TFA");
             }
-
-            // clean up
-            std::fs::remove_file("./test_last_log_tfa.db").expect("Failed to clean database.");
         }
 
         #[tokio::test]
@@ -549,10 +539,6 @@ pub mod db {
             if let Ok(result_content) = result {
                 assert_eq!(result_content, ContentTypes::PlainText);
             }
-
-            // clean up
-            std::fs::remove_file("./test_check_content_plain.db")
-                .expect("Failed to clean database.");
         }
 
         #[tokio::test]
@@ -588,12 +574,8 @@ pub mod db {
             if let Ok(result_content) = result {
                 assert_eq!(result_content, ContentTypes::PlainText);
             }
-
-            // clean up
-            std::fs::remove_file("./test_check_content_plain_older.db")
-                .expect("Failed to clean database.");
         }
-        
+
         #[tokio::test]
         async fn it_checks_content_type_email() {
             let payload = LogPayload {
@@ -617,11 +599,8 @@ pub mod db {
             if let Ok(result_content) = result {
                 assert_eq!(result_content, ContentTypes::Email);
             }
-
-            // clean up
-            std::fs::remove_file("./test_check_content_email.db").expect("Failed to clean database.");
         }
-        
+
         #[tokio::test]
         async fn it_checks_content_type_email_without_previous_content() {
             let payload = LogPayload {
@@ -641,9 +620,6 @@ pub mod db {
             if let Ok(result_content) = result {
                 assert_eq!(result_content, ContentTypes::Email);
             }
-
-            // clean up
-            std::fs::remove_file("./test_check_content_email_without.db").expect("Failed to clean database.");
         }
 
         #[tokio::test]
@@ -675,11 +651,8 @@ pub mod db {
             if let Ok(result_content) = result {
                 assert_eq!(result_content, ContentTypes::Password);
             }
-
-            // clean up
-            std::fs::remove_file("./test_check_content_password.db").expect("Failed to clean database.");
         }
-        
+
         #[tokio::test]
         async fn it_checks_content_type_tfa() {
             let payload = LogPayload {
@@ -719,9 +692,6 @@ pub mod db {
             if let Ok(result_content) = result {
                 assert_eq!(result_content, ContentTypes::TFA);
             }
-
-            // clean up
-            std::fs::remove_file("./test_check_content_tfa.db").expect("Failed to clean database.");
         }
     }
 }
