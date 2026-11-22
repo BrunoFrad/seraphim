@@ -1,5 +1,5 @@
 use clap::Parser;
-use seraphim::{cli::*, server::Server};
+use seraphim::{cli::cli::{Cli, Commands}, server::server::Server};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
