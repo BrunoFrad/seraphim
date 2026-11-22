@@ -16,6 +16,7 @@ sqlx = { version = "0.8", features = [
     "macros"
 ] }
 tokio = { version = "1", features = ["full"] }
+lipgloss = "0.1.1"
 
 [dev-dependencies]
 temp_testdir = "0.2"

@@ -10,7 +10,7 @@ async fn main() -> std::io::Result<()> {
 
     match cli.command {
         Commands::Watch { port } => {
-            println!("=> Server is running on ws://127.0.0.1:{port}");
+            seraphim::banner(port);
 
             let server = Server::new().await.map_err(std::io::Error::other)?;
 
